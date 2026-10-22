@@ -30,3 +30,16 @@ Red target: left foot. Blue target: right foot.
 Default schedule: 0-2 s stand, 2-12 s forward (0.25 m foothold displacement),
 12-16 s turn 10 degrees per step, 16-25 s stand. Gait frequency is 1 Hz.
 These are foothold commands; no global waypoint or heading-hold controller.
+
+Runtime timing: physics, GT state reads/logging and PD torque updates are 1 kHz
+(1 ms). Policy inference, foothold phase updates and rendering remain 50 Hz
+(20 ms, 20 physics steps per action). This is simulation time, not a wall-clock
+real-time guarantee. No IMU/radar sensor or state-estimator stream is generated.
+export.json retains the source model's 5 ms / 4-step training metadata;
+setup.json records the deployed 1 ms / 20-step timing.
+trace.npz samples the state before each physics step. root_lin_vel (m/s) and
+omega_world (rad/s) are world-frame GT velocities. torque (Nm) is the clipped
+PD + damping + friction compensation torque actually applied on that step.
+observation/action/targets/command/phase hold the latest 50 Hz policy values;
+is_policy_step marks fresh actor calls and policy_index identifies each call.
+Select trace['is_policy_step'] to recover the 50 Hz policy-time samples.

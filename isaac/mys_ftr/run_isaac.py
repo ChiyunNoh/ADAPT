@@ -12,6 +12,10 @@ os.environ.setdefault('OMNI_KIT_ACCEPT_EULA','YES')
 os.environ['PYTHONDONTWRITEBYTECODE']='1'
 sys.stdout.reconfigure(line_buffering=True)
 ROOT=Path(__file__).resolve().parent
+# Keep the frozen actor and gait clock at the trained 50 Hz.
+PHYSICS_DT=.001
+POLICY_DT=.02
+DECIMATION=round(POLICY_DT/PHYSICS_DT)
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--headless',action='store_true')
 p.add_argument('--render',action='store_true',help='Exercise rendering even with a hidden window')
@@ -98,7 +102,7 @@ def main():
     usd=convert(meta)
     if args.convert_only:
         print('CONVERSION_OK',usd);return
-    world=World(physics_dt=.005,rendering_dt=.02,stage_units_in_meters=1.)
+    world=World(physics_dt=PHYSICS_DT,rendering_dt=POLICY_DT,stage_units_in_meters=1.)
     stage=omni.usd.get_context().get_stage()
     light=UsdLux.DomeLight.Define(stage,'/World/Light')
     light.CreateIntensityAttr(1000.)
@@ -152,7 +156,7 @@ def main():
             pp,qq=feet[side].get_world_poses();rr=rotation(qq[0])
             positions.append(pp[0]+rr.apply(spec['pos']))
             quats.append(quat(rr*rotation(spec['quat'])))
-            forces.append(np.asarray(feet[side].get_net_contact_forces(dt=.005))[0])
+            forces.append(np.asarray(feet[side].get_net_contact_forces(dt=PHYSICS_DT))[0])
         return np.asarray(positions),np.asarray(quats),np.asarray(forces)
     fp,fq,ff=foot_state()
     goals=Footholds(fp,fq)
@@ -169,57 +173,73 @@ def main():
     masses=dict(zip(view.body_names,np.asarray(view.get_body_masses())[0].tolist()))
     mass_error=max(abs(masses[k]-v) for k,v in meta['native_body_masses'].items() if k in masses)
     initial_pose=np.asarray(view.get_world_poses()[0])[0].copy()
-    (args.output/'setup.json').write_text(json.dumps(dict(isaacsim='5.1.0',physics_dt=.005,decimation=4,
-        policy_dt=.02,joint_order=names,policy_to_dof=ids.tolist(),body_masses=masses,
+    (args.output/'setup.json').write_text(json.dumps(dict(isaacsim='5.1.0',physics_dt=PHYSICS_DT,decimation=DECIMATION,
+        policy_dt=POLICY_DT,state_log_dt=PHYSICS_DT,
+        source_physics_dt=meta['physics_dt'],source_decimation=meta['decimation'],
+        trace_sampling='pre-physics-step; observation/action/targets held between policy updates',
+        velocity_frame='world',torque_units='Nm',joint_order=names,policy_to_dof=ids.tolist(),body_masses=masses,
         mass_error_max_kg=mass_error,native_mass_kg=meta['native_total_mass'],
         checkpoint_sha256=meta['checkpoint_sha256'],no_training=True,normalization_frozen=True,
         root= str(arts[0].GetPath()),bodypaths=bodypaths,initial_position=initial_pose.tolist(),
         native_frictionloss_Nm=meta['joint_frictionloss'],frictionloss_model='explicit opposing torque outside zero velocity; PhysX regularization differs',
         self_collision='explicit source geom pairs filtered in USD'),indent=2))
     print('SETUP_READY',dict(mass_error_max_kg=mass_error,initial_foot_pos=fp.tolist(),initial_root=initial_pose.tolist()))
-    log={k:[] for k in ['time','root_pos','root_quat','q','dq','omega_world','foot_pos','foot_quat','contact_force',
-                        'observation','action','torque','targets','tilt_deg','command','phase']}
+    log={k:[] for k in ['time','root_pos','root_quat','root_lin_vel','q','dq','omega_world',
+                        'foot_pos','foot_quat','contact_force','observation','action','torque',
+                        'targets','tilt_deg','command','phase','is_policy_step','policy_index']}
     fall=None;bad=0;wall=time.monotonic();simulation_start=float(world.current_time)
-    for k in range(round(args.seconds/.02)):
+    physics_steps=0;policy_updates=0
+    fall_samples=round(.2/PHYSICS_DT)
+    total_steps=round(args.seconds/POLICY_DT)*DECIMATION
+    for step in range(total_steps):
         if not app.is_running():break
-        start=time.monotonic();t=k*.02
+        t=step*PHYSICS_DT
+        is_policy_step=step%DECIMATION==0
+        # Read fresh PhysX state on every 1 ms tick, including between actor calls.
         pos,ori=view.get_world_poses();pos,ori=np.asarray(pos)[0],np.asarray(ori)[0]
         q=np.asarray(view.get_joint_positions())[0,ids];dq=np.asarray(view.get_joint_velocities())[0,ids]
-        omega=np.asarray(view.get_angular_velocities())[0]
+        velocity=np.asarray(view.get_velocities())[0]
+        linear_velocity,omega=velocity[:3],velocity[3:]
         fp,fq,ff=foot_state()
-        command=np.array([args.stride,0.,0.,float(t>=2. and args.mode!='stand')])
-        if args.mode=='schedule':
-            if 12.<=t<16.:command[2]=np.deg2rad(10.)
-            if t>=16.:command[3]=0.
-        obs=goals.observation(pos,ori,q,dq,omega,fp,fq,command,t)
-        action=actor(obs).reshape(-1)
-        target=np.clip(nominal+np.clip(action,-control['clip_actions'],control['clip_actions'])*control['action_scale'],limits[:,0],limits[:,1])
+        if is_policy_step:
+            start=time.monotonic()
+            command=np.array([args.stride,0.,0.,float(t>=2. and args.mode!='stand')])
+            if args.mode=='schedule':
+                if 12.<=t<16.:command[2]=np.deg2rad(10.)
+                if t>=16.:command[3]=0.
+            obs=goals.observation(pos,ori,q,dq,omega,fp,fq,command,t)
+            action=actor(obs).reshape(-1)
+            target=np.clip(nominal+np.clip(action,-control['clip_actions'],control['clip_actions'])*control['action_scale'],limits[:,0],limits[:,1])
+            policy_updates+=1
         tilt=float(np.rad2deg(np.arccos(np.clip(rotation(ori).as_matrix()[2,2],-1,1))))
+        # Preserve the 0.2 s fall-confirmation duration at the faster sample rate.
         bad=bad+1 if pos[2]<.35 or tilt>60. else 0
-        if bad>=10:
-            fall=t-.18
-        torque=np.clip(kp*(target-q)-(kd+viscous)*dq,torque_limits[:,0],torque_limits[:,1])
-        row=dict(time=t,root_pos=pos,root_quat=ori,q=q,dq=dq,omega_world=omega,foot_pos=fp,foot_quat=fq,contact_force=ff,
-                 observation=obs,action=action,torque=torque,targets=goals.pos.copy(),tilt_deg=tilt,command=command,phase=goals.phase)
+        if bad>=fall_samples:
+            fall=t-(bad-1)*PHYSICS_DT
+        friction=np.asarray(meta['joint_frictionloss'])*np.tanh(dq/.01)
+        torque=np.clip(kp*(target-q)-(kd+viscous)*dq-friction,torque_limits[:,0],torque_limits[:,1])
+        row=dict(time=t,root_pos=pos,root_quat=ori,root_lin_vel=linear_velocity,q=q,dq=dq,omega_world=omega,
+                 foot_pos=fp,foot_quat=fq,contact_force=ff,observation=obs,action=action,torque=torque,
+                 targets=goals.pos.copy(),tilt_deg=tilt,command=command,phase=goals.phase,
+                 is_policy_step=is_policy_step,policy_index=policy_updates-1)
         for key in log:log[key].append(row[key])
-        if k%50==0:print('STATE',json.dumps(dict(time=t,position=pos.tolist(),tilt=tilt,walking=bool(command[3]))))
+        if step%round(1./PHYSICS_DT)==0:
+            print('STATE',json.dumps(dict(time=t,position=pos.tolist(),tilt=tilt,walking=bool(command[3]))))
+        view.set_joint_efforts(dof(torque)[None])
+        world.step(render=False)
+        physics_steps+=1
+        if (step+1)%DECIMATION==0:
+            goals.advance(action)
+            if not args.headless or args.render:
+                from isaacsim.core.utils.viewports import set_camera_view
+                for side,(tr,oriop) in enumerate(markers):
+                    marker_position=goals.pos[side].copy();marker_position[2]=.004
+                    tr.Set(Gf.Vec3d(*map(float,marker_position)))
+                    qq=goals.orn[side];oriop.Set(Gf.Quatf(float(qq[0]),Gf.Vec3f(*map(float,qq[1:]))))
+                set_camera_view(eye=pos+[-2.,-2.,1.],target=pos+[0.,0.,.05])
+                world.render()
+                if not args.headless:time.sleep(max(0.,POLICY_DT-(time.monotonic()-start)))
         if fall is not None:break
-        for sub in range(4):
-            q=np.asarray(view.get_joint_positions())[0,ids];dq=np.asarray(view.get_joint_velocities())[0,ids]
-            friction=np.asarray(meta['joint_frictionloss'])*np.tanh(dq/.01)
-            torque=np.clip(kp*(target-q)-(kd+viscous)*dq-friction,torque_limits[:,0],torque_limits[:,1])
-            view.set_joint_efforts(dof(torque)[None])
-            world.step(render=False)
-        goals.advance(action)
-        if not args.headless or args.render:
-            from isaacsim.core.utils.viewports import set_camera_view
-            for side,(tr,oriop) in enumerate(markers):
-                marker_position=goals.pos[side].copy();marker_position[2]=.004
-                tr.Set(Gf.Vec3d(*map(float,marker_position)))
-                qq=goals.orn[side];oriop.Set(Gf.Quatf(float(qq[0]),Gf.Vec3f(*map(float,qq[1:]))))
-            set_camera_view(eye=pos+[-2.,-2.,1.],target=pos+[0.,0.,.05])
-            world.render()
-            if not args.headless:time.sleep(max(0.,.02-(time.monotonic()-start)))
     trace={k:np.asarray(v) for k,v in log.items()}
     assert all(np.isfinite(v).all() for v in trace.values())
     np.savez_compressed(args.output/'trace.npz',**trace)
@@ -232,7 +252,9 @@ def main():
                 command=json.dumps(vars(args),default=str),wall_seconds=time.monotonic()-wall,
                 actor_unchanged=hashlib.sha256((ROOT/'actor.npz').read_bytes()).hexdigest()==actor_hash,
                 source_checkpoint_unchanged=(hashlib.sha256(args.checkpoint.read_bytes()).hexdigest()==meta['checkpoint_sha256']) if args.checkpoint is not None else None)
-    result['physics_time_error_s']=elapsed-(k+int(fall is None))*.02
+    result.update(physics_dt=PHYSICS_DT,policy_dt=POLICY_DT,state_log_dt=PHYSICS_DT,
+                  decimation=DECIMATION,physics_steps=physics_steps,policy_updates=policy_updates,
+                  logged_samples=len(trace['time']),physics_time_error_s=elapsed-physics_steps*PHYSICS_DT)
     (args.output/'result.json').write_text(json.dumps(result,indent=2))
     print('RESULT',json.dumps(result))
 

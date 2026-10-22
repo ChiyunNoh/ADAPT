@@ -398,6 +398,8 @@ bash isaac/mys_ftr/view.sh --headless --mode walk --seconds 25
 Defaults: stand → forward → turn → stop over 25 s; red/blue markers are left/right foot targets.
 The actor and robot assets are bundled; USD is generated on first launch and logs go to `isaac/mys_ftr/runs/`.
 Set `ISAAC_PYTHON=/path/to/isaac/python` to select a different interpreter.
+Physics, GT state logging and PD torque updates run at **1 kHz**; the frozen policy stays at **50 Hz** (20 physics steps per action).
+`trace.npz` contains 1 ms state samples; `is_policy_step` selects fresh policy evaluations, and observation/action/targets are held between them. These are GT states; sensor/estimator streams are not enabled.
 
 ## Citation
 
