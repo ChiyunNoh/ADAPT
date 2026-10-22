@@ -133,7 +133,7 @@ def make_momo_lumped_env_cfg() -> ManagerBasedRlEnvCfg:
         "base_lin_vel": ObservationTermCfg(
             func=velocity_mdp.builtin_sensor,
             params={"sensor_name": "robot/imu_lin_vel"},
-            noise=Unoise(n_min=-0.5, n_max=0.5),
+            noise=Unoise(n_min=-0.05, n_max=0.05),
             history_length=history_length,
         ),
         "base_ang_vel": ObservationTermCfg(
@@ -635,6 +635,9 @@ def unitree_g1_momo_lumped_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnv
         _add_small_joint_friction_rand(cfg)
 
     if play:
+        # Restoring a checkpoint restores the curriculum step counter too.
+        # Keep resets from replacing the fixed playback command ranges.
+        cfg.curriculum.pop("command_vel", None)
         cfg.commands["twist"] = UniformVelocityCommandCfg(
             entity_name="robot",
             resampling_time_range=(10.0, 10.0),

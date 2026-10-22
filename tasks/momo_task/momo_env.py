@@ -177,6 +177,13 @@ class MoMoEnv(ManagerBasedRlEnv):
         self.load_managers()
         self.setup_manager_visualizers()
 
+    def _prepare_observer_inputs(self, env_ids=None):
+        """Optional measurement transform, before ideal dynamics and momentum.
+
+        The default leaves base inputs unchanged. Evaluation environments can
+        override this hook; env_ids identifies reset states (no time advance).
+        """
+
     def step(self, action: torch.Tensor) -> VecEnvStepReturn:
         self.action_manager.process_action(action.to(self.device))
         for decimation_step in range(self.cfg.decimation):
@@ -235,6 +242,7 @@ class MoMoEnv(ManagerBasedRlEnv):
             noise_vel = torch.zeros(self.num_envs, self._nu, device=self.device)
             noise_vel.uniform_(-self._qvel_noise_range, self._qvel_noise_range)
             self.ideal_qvel_view[:, self._nv_base :] += noise_vel
+        self._prepare_observer_inputs()
         with wp.ScopedDevice(self.sim.wp_device):
             mjwarp.forward(self.ideal_wp_model, self.ideal_data)
             mjwarp.mul_m(
@@ -264,6 +272,7 @@ class MoMoEnv(ManagerBasedRlEnv):
             self.ideal_qpos_view[reset_env_ids] = self.sim.data.qpos[reset_env_ids]
             self.ideal_qvel_view[reset_env_ids] = self.sim.data.qvel[reset_env_ids]
             self.ideal_ctrl_view[reset_env_ids] = self.sim.data.ctrl[reset_env_ids]
+            self._prepare_observer_inputs(reset_env_ids)
             with wp.ScopedDevice(self.sim.wp_device):
                 mjwarp.forward(self.ideal_wp_model, self.ideal_data)
                 mjwarp.mul_m(
@@ -319,6 +328,7 @@ class MoMoEnv(ManagerBasedRlEnv):
         self.ideal_qpos_view[env_ids] = self.sim.data.qpos[env_ids]
         self.ideal_qvel_view[env_ids] = self.sim.data.qvel[env_ids]
         self.ideal_ctrl_view[env_ids] = self.sim.data.ctrl[env_ids]
+        self._prepare_observer_inputs(env_ids)
         with wp.ScopedDevice(self.sim.wp_device):
             mjwarp.forward(self.ideal_wp_model, self.ideal_data)
             mjwarp.mul_m(

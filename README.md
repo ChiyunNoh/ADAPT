@@ -186,6 +186,84 @@ Alternatively, run the Python script directly:
 uv run --extra train python scripts/play.py <TASK_NAME> --checkpoint <CHECKPOINT_PATH>
 ```
 
+Playback can use a finer physics timestep while keeping the trained 20 ms
+policy/observer period. For 1 ms physics and a constant 2 kg-equivalent load
+on the left wrist:
+
+```bash
+uv run --frozen --extra train python -m scripts.play <TASK_NAME> \
+  --checkpoint <CHECKPOINT_PATH> \
+  --physics-dt 0.001 \
+  --left-hand-load-kg 2 \
+  --viewer native
+```
+
+Use `--right-hand-load-kg` for the right wrist, or pass both options for
+independent loads on both wrists. Each defaults to zero. Loads are constant
+world-frame forces equal to mass times gravity (2 kg is 19.62 N downward
+under default gravity), applied from the start and reapplied after resets.
+They do not add a physical object, collision geometry, or payload inertia.
+These options affect playback only; training settings remain unchanged.
+
+Evaluate shared actor/observer linear-velocity input noise and fixed latency with a frozen
+checkpoint (GPU required):
+
+```bash
+uv run --frozen --extra train python -m scripts.evaluate_velocity_sensitivity \
+  --checkpoint <CHECKPOINT_PATH> \
+  --output logs/evaluation/velocity_sensitivity
+```
+
+The default sweep uses 1 ms physics, the trained 20 ms control period, a fixed
+0.8 m/s forward command, no external loads, and 10 randomized trials of 30 s
+per condition. Uniform noise half-widths are 0, 0.05, 0.1, 0.2, and 0.5 m/s;
+fixed delays are 0, 20, 40, 80, and 120 ms. Noise is applied before delay and
+observation history. One corrupted sample feeds both the actor's three linear
+velocity channels and the momentum observer, before the observer's dynamics and
+momentum computation. The observer input accounts for the IMU site offset and
+converts the same measurement error to world-frame free-joint velocity. Delay
+applies to linear velocity only; orientation and angular velocity remain current.
+Other observation noise stays at the training settings (actor angular velocity
+±0.2 rad/s; observer angular velocity unperturbed). Pass `--target actor` for an
+actor-only control experiment. Training behavior is unchanged.
+The output directory must be new; it receives experiment
+metadata, per-trial metrics, summaries, sampled trajectories, and heatmaps.
+Tracking RMSE excludes the first 2 s and is censored at the first fall; report
+it alongside the fall rate. The primary tracking metric is planar velocity
+vector RMSE: `sqrt(mean((vx-vx_cmd)^2 + (vy-vy_cmd)^2))`, in m/s, without
+dividing by the number of axes. Per-trial values are aggregated as mean and
+standard deviation. Axis-specific RMSE remains available for diagnosis;
+yaw-rate RMSE is reported separately in rad/s. Older runs can be re-summarized
+without rerunning the simulation, using each trial's saved axis RMSE values.
+Drift is measured up to the last nonterminal
+sample, using unwrapped heading so full turns are not hidden.
+
+Repeat with different `--seed` values and new output directories to check
+repeatability. Pool compatible runs and plot their mean and standard deviation:
+
+```bash
+uv run --frozen --extra train python -m scripts.summarize_velocity_sensitivity \
+  <RUN_DIRECTORY_1> <RUN_DIRECTORY_2> <RUN_DIRECTORY_3> \
+  --output logs/evaluation/velocity_sensitivity_combined
+```
+
+To evaluate the three metrics in ADAPT Appendix D (equations 14–16), use:
+
+```bash
+.venv/bin/python -m scripts.evaluate_paper_metrics \
+  <RUN_DIRECTORY_1> <RUN_DIRECTORY_2> <RUN_DIRECTORY_3> \
+  --output logs/evaluation/velocity_sensitivity_paper_metrics
+```
+
+This preserves each trial's full-rate forward-velocity RMSE and computes
+absolute world-y drift and absolute wrapped yaw drift in radians over the same
+tracking window. With the default settings, the first and last samples are
+2.02 s and 30.00 s. Exact endpoint samples must exist in the saved trajectories;
+the analyzer rejects incomplete trials or missing endpoints instead of
+interpolating. Wrapping is applied per trial before averaging. This matches the
+paper's metric definitions, while retaining this experiment's sensor noise and
+delay protocol; it does not reproduce Figure 3's torso-force experiment.
+
 Export a checkpoint for deployment:
 
 ```bash

@@ -22,6 +22,8 @@ train = [
   "warp-lang==1.12.0",
   "torch==2.9.1",
   "rsl-rl-lib==5.0.1",
+  # RSL-RL 5.0.1 passes Settings(start_method=...), removed in W&B 0.29.
+  "wandb<0.29",
   "onnx>=1.17,<1.20",
   "onnxscript",
   "tensorboard",
