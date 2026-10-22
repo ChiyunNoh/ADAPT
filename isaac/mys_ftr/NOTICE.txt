@@ -14,7 +14,8 @@ actor.npz contains actor weights and frozen observation mean/variance only.
 The original user-provided checkpoint SHA256 is recorded in export.json.
 This is not an official MYS checkpoint release or an exact paper reproduction.
 The bundled actor passes a 25 s forward and a 25 s stand/forward/turn/stop GT
-rollout in Isaac Sim 5.1. No estimator, radar, payload or training is enabled.
+rollout in Isaac Sim 5.1. No estimator, payload or training is enabled.
+IMU / RTX radar recording is optional (--imu / --radar); policy input stays GT.
 PhysX and MuJoCo contact/friction solvers are different; the port preserves
 joint order, FK, masses, PD gains, action scaling and torque limits.
 
@@ -34,7 +35,8 @@ These are foothold commands; no global waypoint or heading-hold controller.
 Runtime timing: physics, GT state reads/logging and PD torque updates are 1 kHz
 (1 ms). Policy inference, foothold phase updates and rendering remain 50 Hz
 (20 ms, 20 physics steps per action). This is simulation time, not a wall-clock
-real-time guarantee. No IMU/radar sensor or state-estimator stream is generated.
+real-time guarantee. Native IMU / radar streams require explicit sensor flags;
+no state-estimator stream is generated.
 export.json retains the source model's 5 ms / 4-step training metadata;
 setup.json records the deployed 1 ms / 20-step timing.
 trace.npz samples the state before each physics step. root_lin_vel (m/s) and
@@ -43,3 +45,42 @@ PD + damping + friction compensation torque actually applied on that step.
 observation/action/targets/command/phase hold the latest 50 Hz policy values;
 is_policy_step marks fresh actor calls and policy_index identifies each call.
 Select trace['is_policy_step'] to recover the 50 Hz policy-time samples.
+
+Optional native sensors:
+- --imu: torso-origin IMUSensor at 1 kHz, identity mount, filter widths 1.
+  imu.npz saves native reading timestamps and delivery times separately. It contains
+  sensor-frame specific_force (accelerometer, +g at rest) and angular_velocity;
+  orientation_wxyz_gt is simulator reference only, not an estimator measurement.
+  Initial native readings can precede delivery by one physics tick; no resampling.
+- --radar: torso-mounted native RTX WPM DMAT radar at 10 Hz (+X forward,
+  default translation 0.16,0,0.16 m; configurable pitch and translation).
+  Motion BVH is enabled before SimulationApp starts. Materials use USD nonvisual
+  base steel (CSV disabled); a nonempty legacy DefaultMaterial / MetalAlloyMaterial
+  name map is supplied for 5.1 WPM compatibility. Exact flags are in sensors.json.
+  Posts are visual/radar geometry outside the walking lane, without collisions.
+  --no-radar-reflectors leaves the original empty flat scene.
+  No artificial floor points or Doppler synthesized from GT are added.
+  XYZ is in the radar frame. velocity is native rv_ms (m/s); scalar is not a
+  calibrated CFAR SNR / RCS measurement. This is not a specific TI hardware model.
+- radar.npz uses one time/receipt_time/frame_id per frame and offsets[N+1] into
+  concatenated xyz/velocity/scalar/azimuth_deg/elevation_deg/range_m arrays.
+  time is the native scan END mapped into rollout simulation seconds; time_start
+  preserves the start. timestamp_ns and frame_end_timestamp_ns keep the raw RTX
+  clock. RTX uses a separate clock and delayed render output. Clock association
+  matches native frame-end poses to recorded render requests, fixes one offset,
+  and validates both scan endpoints. Stale reset frames are rejected, not retimed.
+  Native frame endpoint pose/quaternion fields ending in _gt are diagnostic
+  reference data; do not feed them to the estimator. sensors.json records mapping,
+  counts, mount transforms and configured units/rates. Warm-up frames may be absent.
+- With --radar, RTX renders at 50 Hz even when headless to keep frame latency low.
+  Isaac 5.1 WPM tickRate does not reliably throttle native render output; record
+  only native scans ending on the 10 Hz simulation-time grid (no interpolation).
+  Native scan start/end times preserve the actual integration window. Physics/IMU/PD remain 1 kHz,
+  and the frozen policy / gait remain 50 Hz. No estimator feedback or ROS bridge
+  is enabled. Neither IMU noise/bias nor radar error statistics have been matched
+  to the user's hardware; this bring-up is not an estimator accuracy benchmark.
+
+NVIDIA Isaac Sim 5.1 API references:
+https://docs.isaacsim.omniverse.nvidia.com/5.1.0/sensors/isaacsim_sensors_physics_imu.html
+https://docs.isaacsim.omniverse.nvidia.com/5.1.0/sensors/isaacsim_sensors_rtx_radar.html
+https://docs.isaacsim.omniverse.nvidia.com/5.1.0/sensors/isaacsim_sensors_rtx_annotators.html

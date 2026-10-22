@@ -399,7 +399,21 @@ Defaults: stand → forward → turn → stop over 25 s; red/blue markers are le
 The actor and robot assets are bundled; USD is generated on first launch and logs go to `isaac/mys_ftr/runs/`.
 Set `ISAAC_PYTHON=/path/to/isaac/python` to select a different interpreter.
 Physics, GT state logging and PD torque updates run at **1 kHz**; the frozen policy stays at **50 Hz** (20 physics steps per action).
-`trace.npz` contains 1 ms state samples; `is_policy_step` selects fresh policy evaluations, and observation/action/targets are held between them. These are GT states; sensor/estimator streams are not enabled.
+`trace.npz` contains 1 ms state samples; `is_policy_step` selects fresh policy evaluations, and observation/action/targets are held between them. These are GT states; the policy continues to use GT when sensor recording is enabled.
+
+Optional native sensors (IMU **1 kHz**, RTX radar **10 Hz**):
+
+```bash
+bash isaac/mys_ftr/view.sh --imu --radar
+# Record without a window:
+bash isaac/mys_ftr/view.sh --headless --imu --radar
+```
+
+Logs: `imu.npz` (specific force + gyro), `radar.npz` (XYZ + native Doppler, ragged frames via `offsets`), and `sensors.json` (extrinsics, units and timing).
+RTX/GUI rendering stays at 50 Hz to reduce frame latency; radar output is limited to the 10 Hz simulation-time grid. Physics/IMU remain 1 kHz and the policy 50 Hz.
+The generic radar sees added static steel posts outside the walking lane; `--no-radar-reflectors` keeps the original scene.
+Use `--radar-translation X Y Z` / `--radar-pitch-deg DEG` to change the torso mount.
+These are simulated sensor streams with no hardware noise calibration; GaRLILEO and ROS publishing are not connected.
 
 ## Citation
 

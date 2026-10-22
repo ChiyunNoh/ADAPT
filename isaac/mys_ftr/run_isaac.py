@@ -1,4 +1,4 @@
-"""Frozen Booster T1 MYS FT-R deployment in Isaac Sim 5.1; native GT only."""
+"""Frozen Booster T1 MYS FT-R deployment in Isaac Sim 5.1; GT policy with optional native IMU / RTX radar recording."""
 import argparse
 import hashlib
 import json
@@ -27,11 +27,20 @@ p.add_argument('--output',type=Path,required=True)
 p.add_argument('--convert-only',action='store_true')
 p.add_argument('--rebuild',action='store_true')
 p.add_argument('--checkpoint',type=Path,help='Optional original MYS pickle: verify its provenance hash; inference uses bundled actor.npz')
+p.add_argument('--imu',action='store_true',help='Record native torso IMU at 1 kHz; policy keeps GT input')
+p.add_argument('--radar',action='store_true',help='Record native torso RTX radar at 10 Hz; enables rendering in headless mode')
+p.add_argument('--radar-translation',nargs=3,type=float,default=[.16,0.,.16],metavar=('X','Y','Z'),help='Radar mount in torso frame, metres')
+p.add_argument('--radar-pitch-deg',type=float,default=0.,help='Positive pitches radar down about torso +Y')
+p.add_argument('--no-radar-reflectors',action='store_true',help='Keep the original empty flat scene')
 p.add_argument('--disable-self-collision',action='store_true',help='Diagnostic only')
 args=p.parse_args()
 args.output.mkdir(parents=True,exist_ok=False)
+from sensors import RTX_ARGS, SensorSuite
+RENDER_DT=POLICY_DT  # Render independently of the radar publication rate.
+RENDER_DECIMATION=round(RENDER_DT/PHYSICS_DT)
 from isaacsim import SimulationApp
-app=SimulationApp({'headless':args.headless,'width':1280,'height':720,'anti_aliasing':0})
+app=SimulationApp({'headless':args.headless,'width':1280,'height':720,'anti_aliasing':0,
+                   'extra_args':RTX_ARGS if args.radar else []})
 import numpy as np
 import omni.usd
 import omni.kit.commands
@@ -102,7 +111,7 @@ def main():
     usd=convert(meta)
     if args.convert_only:
         print('CONVERSION_OK',usd);return
-    world=World(physics_dt=PHYSICS_DT,rendering_dt=POLICY_DT,stage_units_in_meters=1.)
+    world=World(physics_dt=PHYSICS_DT,rendering_dt=RENDER_DT,stage_units_in_meters=1.)
     stage=omni.usd.get_context().get_stage()
     light=UsdLux.DomeLight.Define(stage,'/World/Light')
     light.CreateIntensityAttr(1000.)
@@ -123,6 +132,9 @@ def main():
             UsdShade.MaterialBindingAPI.Apply(prim).Bind(UsdShade.Material(matprim),UsdShade.Tokens.strongerThanDescendants,'physics')
     feet={side:RigidPrim(bodypaths[spec['body']],name=side+'_foot',track_contact_forces=True,prepare_contact_sensors=True)
           for side,spec in meta['feet'].items()}
+    sensors=SensorSuite(stage,bodypaths['Trunk'],PHYSICS_DT,imu=args.imu,radar=args.radar,radar_hz=10.,
+                        radar_translation=args.radar_translation,radar_pitch_deg=args.radar_pitch_deg,
+                        reflectors=not args.no_radar_reflectors) if args.imu or args.radar else None
     world.reset()
     view=Articulation(str(arts[0].GetPath()),name='t1');view.initialize()
     if args.disable_self_collision:
@@ -148,6 +160,11 @@ def main():
     view.set_joint_positions(qdof[None]);view.set_joint_velocities(np.zeros((1,23)))
     view.set_joint_position_targets(qdof[None]);view.set_joint_velocity_targets(np.zeros((1,23)))
     view.set_joint_efforts(np.zeros((1,23)))
+    simulation_start=float(world.current_time)
+    if sensors is not None:
+        sensors.initialize(simulation_start)
+        sensor_pos,sensor_quat=view.get_world_poses()
+        sensors.before_render(0.,np.asarray(sensor_pos)[0],np.asarray(sensor_quat)[0])
     # One render refreshes the USD display without advancing the reset state.
     world.render()
     def foot_state():
@@ -174,7 +191,7 @@ def main():
     mass_error=max(abs(masses[k]-v) for k,v in meta['native_body_masses'].items() if k in masses)
     initial_pose=np.asarray(view.get_world_poses()[0])[0].copy()
     (args.output/'setup.json').write_text(json.dumps(dict(isaacsim='5.1.0',physics_dt=PHYSICS_DT,decimation=DECIMATION,
-        policy_dt=POLICY_DT,state_log_dt=PHYSICS_DT,
+        policy_dt=POLICY_DT,state_log_dt=PHYSICS_DT,rendering_dt=RENDER_DT,
         source_physics_dt=meta['physics_dt'],source_decimation=meta['decimation'],
         trace_sampling='pre-physics-step; observation/action/targets held between policy updates',
         velocity_frame='world',torque_units='Nm',joint_order=names,policy_to_dof=ids.tolist(),body_masses=masses,
@@ -187,13 +204,15 @@ def main():
     log={k:[] for k in ['time','root_pos','root_quat','root_lin_vel','q','dq','omega_world',
                         'foot_pos','foot_quat','contact_force','observation','action','torque',
                         'targets','tilt_deg','command','phase','is_policy_step','policy_index']}
-    fall=None;bad=0;wall=time.monotonic();simulation_start=float(world.current_time)
+    fall=None;bad=0;wall=time.monotonic()
+    assert abs(float(world.current_time)-simulation_start)<1e-8, "Rendering unexpectedly advanced physics"
     physics_steps=0;policy_updates=0
     fall_samples=round(.2/PHYSICS_DT)
     total_steps=round(args.seconds/POLICY_DT)*DECIMATION
     for step in range(total_steps):
         if not app.is_running():break
         t=step*PHYSICS_DT
+        if step%RENDER_DECIMATION==0:render_wall_start=time.monotonic()
         is_policy_step=step%DECIMATION==0
         # Read fresh PhysX state on every 1 ms tick, including between actor calls.
         pos,ori=view.get_world_poses();pos,ori=np.asarray(pos)[0],np.asarray(ori)[0]
@@ -202,7 +221,6 @@ def main():
         linear_velocity,omega=velocity[:3],velocity[3:]
         fp,fq,ff=foot_state()
         if is_policy_step:
-            start=time.monotonic()
             command=np.array([args.stride,0.,0.,float(t>=2. and args.mode!='stand')])
             if args.mode=='schedule':
                 if 12.<=t<16.:command[2]=np.deg2rad(10.)
@@ -228,8 +246,10 @@ def main():
         view.set_joint_efforts(dof(torque)[None])
         world.step(render=False)
         physics_steps+=1
+        if sensors is not None:sensors.read_imu(float(world.current_time)-simulation_start)
         if (step+1)%DECIMATION==0:
             goals.advance(action)
+        if (step+1)%RENDER_DECIMATION==0 and (args.radar or not args.headless or args.render):
             if not args.headless or args.render:
                 from isaacsim.core.utils.viewports import set_camera_view
                 for side,(tr,oriop) in enumerate(markers):
@@ -237,8 +257,13 @@ def main():
                     tr.Set(Gf.Vec3d(*map(float,marker_position)))
                     qq=goals.orn[side];oriop.Set(Gf.Quatf(float(qq[0]),Gf.Vec3f(*map(float,qq[1:]))))
                 set_camera_view(eye=pos+[-2.,-2.,1.],target=pos+[0.,0.,.05])
-                world.render()
-                if not args.headless:time.sleep(max(0.,POLICY_DT-(time.monotonic()-start)))
+            if sensors is not None:
+                sensor_pos,sensor_quat=view.get_world_poses()
+                sensors.before_render(float(world.current_time)-simulation_start,
+                                      np.asarray(sensor_pos)[0],np.asarray(sensor_quat)[0])
+            world.render()
+            if sensors is not None:sensors.read_radar(float(world.current_time)-simulation_start)
+            if not args.headless:time.sleep(max(0.,RENDER_DT-(time.monotonic()-render_wall_start)))
         if fall is not None:break
     trace={k:np.asarray(v) for k,v in log.items()}
     assert all(np.isfinite(v).all() for v in trace.values())
@@ -255,6 +280,14 @@ def main():
     result.update(physics_dt=PHYSICS_DT,policy_dt=POLICY_DT,state_log_dt=PHYSICS_DT,
                   decimation=DECIMATION,physics_steps=physics_steps,policy_updates=policy_updates,
                   logged_samples=len(trace['time']),physics_time_error_s=elapsed-physics_steps*PHYSICS_DT)
+    if sensors is not None:
+        sensor_meta=sensors.save(args.output)
+        result.update(imu_samples=sensor_meta['imu_samples'],radar_frames=sensor_meta['radar_frames'],
+                      radar_nonempty_frames=sensor_meta['radar_nonempty_frames'])
+        if args.imu and not sensor_meta['imu_samples']:
+            raise RuntimeError('Native IMU produced no valid samples; inspect sensors.json')
+        if args.radar and not args.no_radar_reflectors and not sensor_meta['radar_nonempty_frames']:
+            raise RuntimeError('Native radar produced no detections with reflectors; inspect renderer logs and sensors.json')
     (args.output/'result.json').write_text(json.dumps(result,indent=2))
     print('RESULT',json.dumps(result))
 
