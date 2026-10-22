@@ -383,6 +383,22 @@ Replace `eno1` with the robot network interface and select `raw` or
 must be enabled explicitly with `--enable-control` after hardware-specific
 validation.
 
+## Isaac Sim 5.1: MYS FT-R
+
+Frozen **Booster T1 foothold-tracking** policy with GT state (separate from ADAPT G1).
+Use an existing Isaac Sim 5.1 / Python 3.11 environment with NumPy and SciPy; keep it separate from ADAPT's Python 3.10 environment.
+
+```bash
+conda activate env_isaaclab
+bash isaac/mys_ftr/view.sh
+# Headless forward walking:
+bash isaac/mys_ftr/view.sh --headless --mode walk --seconds 25
+```
+
+Defaults: stand → forward → turn → stop over 25 s; red/blue markers are left/right foot targets.
+The actor and robot assets are bundled; USD is generated on first launch and logs go to `isaac/mys_ftr/runs/`.
+Set `ISAAC_PYTHON=/path/to/isaac/python` to select a different interpreter.
+
 ## Citation
 
 ```bibtex

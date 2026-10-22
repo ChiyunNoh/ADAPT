@@ -1,0 +1,6 @@
+usd/
+runs/
+__pycache__/
+meshes/*_tmp/
+training_robot.xml
+checkpoint_env.json

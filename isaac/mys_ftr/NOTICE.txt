@@ -1,0 +1,32 @@
+MYS FT-R Isaac Sim deployment
+
+This directory runs a user-provided, frozen Booster T1 foothold-tracking actor.
+It is separate from the ADAPT G1 velocity-tracking policies.
+
+The actor export, root-frame observation adapter, stance-based target generator,
+and nominal robot model were derived from Mind Your Steps / LocoMuJoCo:
+https://github.com/MontenegroAlessandro/loco-mujoco
+Source checkout: 5d174e5f622851b0ba8222f19384a437f25913fb (with local training changes).
+The included LICENSE.loco-mujoco preserves the source repository's MIT notice.
+Booster T1 visual meshes are copied from that repository's booster_t1/assets.
+
+actor.npz contains actor weights and frozen observation mean/variance only.
+The original user-provided checkpoint SHA256 is recorded in export.json.
+This is not an official MYS checkpoint release or an exact paper reproduction.
+The bundled actor passes a 25 s forward and a 25 s stand/forward/turn/stop GT
+rollout in Isaac Sim 5.1. No estimator, radar, payload or training is enabled.
+PhysX and MuJoCo contact/friction solvers are different; the port preserves
+joint order, FK, masses, PD gains, action scaling and torque limits.
+
+Runtime: existing Isaac Sim 5.1 Python environment (Python 3.11, NumPy, SciPy).
+Do not install ADAPT's Python 3.10 environment into this separate environment.
+view.sh uses the active python, or ISAAC_PYTHON if provided. USD is generated
+on the first launch. Run artifacts are ignored under runs/ and usd/.
+
+Re-export (optional; requires the source MYS environment):
+python export_policy.py --checkpoint /path/policy.pkl --mys-repo /path/loco-mujoco
+
+Red target: left foot. Blue target: right foot.
+Default schedule: 0-2 s stand, 2-12 s forward (0.25 m foothold displacement),
+12-16 s turn 10 degrees per step, 16-25 s stand. Gait frequency is 1 Hz.
+These are foothold commands; no global waypoint or heading-hold controller.
