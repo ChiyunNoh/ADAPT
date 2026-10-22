@@ -401,7 +401,9 @@ Set `ISAAC_PYTHON=/path/to/isaac/python` to select a different interpreter.
 Physics, GT state logging and PD torque updates run at **1 kHz**; the frozen policy stays at **50 Hz** (20 physics steps per action).
 `trace.npz` contains 1 ms state samples; `is_policy_step` selects fresh policy evaluations, and observation/action/targets are held between them. These are GT states; the policy continues to use GT when sensor recording is enabled.
 
-Optional native sensors (IMU **1 kHz**, RTX radar **10 Hz**):
+Optional sensors: IMU **1 kHz**, radar output **10 Hz**, policy **50 Hz**.
+The default radar profile is TI AWR1843AOP-inspired, mounted on the Booster T1 chest **20° downward**, without added pillars.
+Place the local `real_floor_model.npz` in `isaac/mys_ftr/calibration/` once (not versioned), or pass `--radar-floor-model /path/to/file.npz`.
 
 ```bash
 bash isaac/mys_ftr/view.sh --imu --radar
@@ -409,11 +411,12 @@ bash isaac/mys_ftr/view.sh --imu --radar
 bash isaac/mys_ftr/view.sh --headless --imu --radar
 ```
 
-Logs: `imu.npz` (specific force + gyro), `radar.npz` (XYZ + native Doppler, ragged frames via `offsets`), and `sensors.json` (extrinsics, units and timing).
-RTX/GUI rendering stays at 50 Hz to reduce frame latency; radar output is limited to the 10 Hz simulation-time grid. Physics/IMU remain 1 kHz and the policy 50 Hz.
-The generic radar sees added static steel posts outside the walking lane; `--no-radar-reflectors` keeps the original scene.
-Use `--radar-translation X Y Z` / `--radar-pitch-deg DEG` to change the torso mount.
-These are simulated sensor streams with no hardware noise calibration; GaRLILEO and ROS publishing are not connected.
+The profile applies the specified range/Doppler/angle noise and quantization to native RTX and empirical PhysX surface returns.
+Logs: `imu.npz`, `radar.npz` (`is_synthetic` distinguishes native detections from synthetic surfaces), and `sensors.json` (profile, extrinsics, timing, calibration hash).
+Use `--no-synthetic-floor` for native RTX only; `--radar-profile generic --radar-pitch-deg 0 --radar-reflectors` restores the earlier pillar diagnostic.
+RTX/GUI rendering stays at 50 Hz; radar frames are selected on the 10 Hz simulation-time grid.
+Mount translation and optional simulation ray-origin shift are controlled by `--radar-translation X Y Z` / `--radar-ray-origin-offset M`.
+These are detection-level approximations; GaRLILEO and ROS publishing are not connected.
 
 ## Citation
 

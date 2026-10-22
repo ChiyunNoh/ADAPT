@@ -46,41 +46,78 @@ observation/action/targets/command/phase hold the latest 50 Hz policy values;
 is_policy_step marks fresh actor calls and policy_index identifies each call.
 Select trace['is_policy_step'] to recover the 50 Hz policy-time samples.
 
-Optional native sensors:
-- --imu: torso-origin IMUSensor at 1 kHz, identity mount, filter widths 1.
-  imu.npz saves native reading timestamps and delivery times separately. It contains
-  sensor-frame specific_force (accelerometer, +g at rest) and angular_velocity;
-  orientation_wxyz_gt is simulator reference only, not an estimator measurement.
-  Initial native readings can precede delivery by one physics tick; no resampling.
-- --radar: torso-mounted native RTX WPM DMAT radar at 10 Hz (+X forward,
-  default translation 0.16,0,0.16 m; configurable pitch and translation).
-  Motion BVH is enabled before SimulationApp starts. Materials use USD nonvisual
-  base steel (CSV disabled); a nonempty legacy DefaultMaterial / MetalAlloyMaterial
-  name map is supplied for 5.1 WPM compatibility. Exact flags are in sensors.json.
-  Posts are visual/radar geometry outside the walking lane, without collisions.
-  --no-radar-reflectors leaves the original empty flat scene.
-  No artificial floor points or Doppler synthesized from GT are added.
-  XYZ is in the radar frame. velocity is native rv_ms (m/s); scalar is not a
-  calibrated CFAR SNR / RCS measurement. This is not a specific TI hardware model.
-- radar.npz uses one time/receipt_time/frame_id per frame and offsets[N+1] into
-  concatenated xyz/velocity/scalar/azimuth_deg/elevation_deg/range_m arrays.
-  time is the native scan END mapped into rollout simulation seconds; time_start
-  preserves the start. timestamp_ns and frame_end_timestamp_ns keep the raw RTX
-  clock. RTX uses a separate clock and delayed render output. Clock association
-  matches native frame-end poses to recorded render requests, fixes one offset,
-  and validates both scan endpoints. Stale reset frames are rejected, not retimed.
-  Native frame endpoint pose/quaternion fields ending in _gt are diagnostic
-  reference data; do not feed them to the estimator. sensors.json records mapping,
-  counts, mount transforms and configured units/rates. Warm-up frames may be absent.
-- With --radar, RTX renders at 50 Hz even when headless to keep frame latency low.
-  Isaac 5.1 WPM tickRate does not reliably throttle native render output; record
-  only native scans ending on the 10 Hz simulation-time grid (no interpolation).
-  Native scan start/end times preserve the actual integration window. Physics/IMU/PD remain 1 kHz,
-  and the frozen policy / gait remain 50 Hz. No estimator feedback or ROS bridge
-  is enabled. Neither IMU noise/bias nor radar error statistics have been matched
-  to the user's hardware; this bring-up is not an estimator accuracy benchmark.
+Optional sensors (GT policy feedback remains unchanged):
+- --imu: torso-origin native IMUSensor at 1 kHz, identity mount, filters 1.
+  imu.npz contains native timestamps, receipt_time, sensor-frame specific_force
+  (+g at rest), angular_velocity and orientation_wxyz_gt for reference only.
+  Initial reading times can precede delivery by one physics tick; no resampling.
+  IMU noise/bias has not been calibrated to the user's hardware.
+- Default --radar profile: ti_awr1843aop, Booster Trunk chest location
+  [0.16,0,0.16] m with +Y pitch 20 deg (boresight points down), roll/yaw zero.
+  This is the user-approved Booster mounting assumption, not K1 head CAD.
+  No added pillars by default. --radar-reflectors adds the earlier diagnostic.
+  Native WPM DMAT with Motion BVH / GMO rv_ms remains the base radar model.
+- TI-inspired detector settings: range resolution 0.065 m, max range 5 m;
+  velocity resolution 0.08 m/s, max unambiguous velocity 2.48 m/s and detection
+  gate +/-2.49 m/s; azimuth/elevation resolution 30/38 deg; FOV +/-60/60 deg;
+  CFAR range and velocity test/guard cells 8/4, binsFromSpec true.
+  These are point-cloud/detection approximations, not a TI waveform/ADC emulator.
+  source_cfg_sha256 in sensors.json identifies local 1843_Standard_Good.cfg.
+  Its comments say 100 ms, but frameCfg is 66.6 ms. We explicitly override output
+  to 10 Hz per user request; we do not claim literal replay of that cfg.
+- Both native and synthetic points receive independent Gaussian perturbations:
+  range 0.01 m, Doppler 0.015 m/s, azimuth 2 deg, elevation 3 deg; then range and
+  Doppler are quantized to 0.0488 m / 0.0762 m/s. Extra native angular/range noise
+  is disabled in this profile. --sensor-seed controls this independently of robot
+  initial-state seed. Real-bag 35 distinct velocities / 24% zeros are descriptive
+  statistics, not forced output targets: they depend on motion and scene.
+  Physical range/FOV/velocity gates act before measurement noise; measured values
+  may slightly exceed those boundaries after noise / rounding.
+- Synthetic surfaces: local real_floor_model.npz (0916 run_02) provides empirical
+  requested counts and direction/intensity samples. SHA256 is saved. The file is
+  intentionally ignored by Git; see calibration/README.txt for setup.
+  Sampled gravity-aligned directions are cast against current PhysX COLLISION
+  geometry at the actual render/acquisition time and cached until matching native
+  RTX delivery. Slopes/steps/pads follow the hit surface; points are not forced
+  onto z=0. Robot and dynamic first hits reject rays, without seeing through them.
+  Visual-only objects have no PhysX ray occlusion. Requested counts can decrease
+  due to range/FOV/occlusion; no success counts are forced.
+  Surface Doppler is a GT-driven static-scene forward model using the actual
+  nominal sensor-pose change over the native render interval (rotation lever arm
+  included). It is SYNTHETIC, not rv_ms from RTX, and is labelled per point.
+  This point simulator is not independent evidence of real-estimator accuracy.
+- Optional --radar-ray-origin-offset moves RTX rays along radar +X; native XYZ
+  is shifted back to the nominal mount. Default is ZERO because no Booster CAD
+  correction was supplied. Native Doppler is preserved at the ray origin; with
+  a nonzero shift, its small rotation-dependent lever-arm difference is not
+  corrected using GT. Both translations and the offset are recorded.
+- --radar-profile generic uses the earlier native-only detector (no empirical
+  model or added measurement noise). Use --radar-pitch-deg 0 --radar-reflectors
+  to reproduce the earlier forward-looking pillar diagnostic. --no-synthetic-floor
+  disables the surface sampler in the TI profile; native flat-floor frames may
+  then be empty. Empty native frames are not filled invisibly.
+- radar.npz uses offsets[N+1] into concatenated point arrays. is_synthetic is
+  true for surface samples; xyz_before_measurement_model and
+  velocity_before_measurement_model preserve input to the added noise model.
+  native_count / floor_target_count / floor_visible_count are per-frame counts.
+  Scalar meanings differ by source: native WPM uncalibrated scalar versus sampled
+  real floor intensity. They are not asserted to be cross-calibrated CFAR SNR.
+  Native header endpoint pose/quaternion fields ending in _gt are reference
+  data only; do not feed them to the estimator.
+- time is scan END in rollout simulation seconds; time_start preserves the start;
+  receipt_time records delivery. timestamp_ns / frame_end_timestamp_ns preserve
+  raw RTX clock values. Clock association matches native endpoint poses to render
+  requests, fixes one offset, and validates both endpoints. Stale reset frames
+  are rejected rather than retimed to improve task metrics.
+- Rendering remains 50 Hz to keep latency low. Isaac 5.1 WPM tickRate does not
+  reliably throttle native output; retain only scans ending on the 10 Hz grid.
+  Actual scan integration windows are preserved. Physics, IMU, encoders and PD
+  remain 1 kHz. This is simulation time, not a wall-clock realtime guarantee.
+  Frozen actor / gait stay 50 Hz. No GaRLILEO feedback, ROS bridge or retraining.
+- USD nonvisual steel materials use CSV-disabled mapping, with a nonempty legacy
+  name map for Isaac 5.1 WPM compatibility; exact launch/settings are saved.
 
-NVIDIA Isaac Sim 5.1 API references:
+NVIDIA references:
 https://docs.isaacsim.omniverse.nvidia.com/5.1.0/sensors/isaacsim_sensors_physics_imu.html
 https://docs.isaacsim.omniverse.nvidia.com/5.1.0/sensors/isaacsim_sensors_rtx_radar.html
 https://docs.isaacsim.omniverse.nvidia.com/5.1.0/sensors/isaacsim_sensors_rtx_annotators.html

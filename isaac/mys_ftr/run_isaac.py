@@ -1,4 +1,4 @@
-"""Frozen Booster T1 MYS FT-R deployment in Isaac Sim 5.1; GT policy with optional native IMU / RTX radar recording."""
+"""Frozen Booster T1 MYS FT-R deployment in Isaac Sim 5.1; GT policy with optional IMU / detection-model radar recording."""
 import argparse
 import hashlib
 import json
@@ -28,12 +28,21 @@ p.add_argument('--convert-only',action='store_true')
 p.add_argument('--rebuild',action='store_true')
 p.add_argument('--checkpoint',type=Path,help='Optional original MYS pickle: verify its provenance hash; inference uses bundled actor.npz')
 p.add_argument('--imu',action='store_true',help='Record native torso IMU at 1 kHz; policy keeps GT input')
-p.add_argument('--radar',action='store_true',help='Record native torso RTX radar at 10 Hz; enables rendering in headless mode')
+p.add_argument('--radar',action='store_true',help='Record 10 Hz torso radar (RTX + optional empirical surfaces); enables headless rendering')
 p.add_argument('--radar-translation',nargs=3,type=float,default=[.16,0.,.16],metavar=('X','Y','Z'),help='Radar mount in torso frame, metres')
-p.add_argument('--radar-pitch-deg',type=float,default=0.,help='Positive pitches radar down about torso +Y')
-p.add_argument('--no-radar-reflectors',action='store_true',help='Keep the original empty flat scene')
+p.add_argument('--radar-pitch-deg',type=float,default=20.,help='Positive pitches radar down about torso +Y')
+p.add_argument('--radar-profile',choices=['generic','ti_awr1843aop'],default='ti_awr1843aop')
+p.add_argument('--radar-floor-model',type=Path,default=ROOT/'calibration'/'real_floor_model.npz',help='Local 0916 run_02 empirical surface-return model')
+p.add_argument('--no-synthetic-floor',action='store_true',help='Record native RTX points only')
+p.add_argument('--radar-ray-origin-offset',type=float,default=0.,help='Simulation-only shift along radar +X; XYZ is shifted back to nominal mount')
+p.add_argument('--sensor-seed',type=int,default=0,help='Sensor randomness, independent of robot initial-state seed')
+reflector_options=p.add_mutually_exclusive_group()
+reflector_options.add_argument('--radar-reflectors',dest='radar_reflectors',action='store_true',default=None)
+reflector_options.add_argument('--no-radar-reflectors',dest='radar_reflectors',action='store_false',help='Keep the original empty flat scene')
 p.add_argument('--disable-self-collision',action='store_true',help='Diagnostic only')
 args=p.parse_args()
+radar_reflectors=args.radar_reflectors if args.radar_reflectors is not None else args.radar_profile=='generic'
+synthetic_floor=args.radar_profile=='ti_awr1843aop' and not args.no_synthetic_floor
 args.output.mkdir(parents=True,exist_ok=False)
 from sensors import RTX_ARGS, SensorSuite
 RENDER_DT=POLICY_DT  # Render independently of the radar publication rate.
@@ -134,7 +143,9 @@ def main():
           for side,spec in meta['feet'].items()}
     sensors=SensorSuite(stage,bodypaths['Trunk'],PHYSICS_DT,imu=args.imu,radar=args.radar,radar_hz=10.,
                         radar_translation=args.radar_translation,radar_pitch_deg=args.radar_pitch_deg,
-                        reflectors=not args.no_radar_reflectors) if args.imu or args.radar else None
+                        reflectors=radar_reflectors,radar_profile=args.radar_profile,
+                        floor_model=args.radar_floor_model,synthetic_floor=synthetic_floor,
+                        radar_origin_offset=args.radar_ray_origin_offset,seed=args.sensor_seed) if args.imu or args.radar else None
     world.reset()
     view=Articulation(str(arts[0].GetPath()),name='t1');view.initialize()
     if args.disable_self_collision:
@@ -286,8 +297,8 @@ def main():
                       radar_nonempty_frames=sensor_meta['radar_nonempty_frames'])
         if args.imu and not sensor_meta['imu_samples']:
             raise RuntimeError('Native IMU produced no valid samples; inspect sensors.json')
-        if args.radar and not args.no_radar_reflectors and not sensor_meta['radar_nonempty_frames']:
-            raise RuntimeError('Native radar produced no detections with reflectors; inspect renderer logs and sensors.json')
+        if args.radar and (radar_reflectors or synthetic_floor) and not sensor_meta['radar_nonempty_frames']:
+            raise RuntimeError('Radar produced no detections with the configured surface model/reflectors; inspect renderer logs and sensors.json')
     (args.output/'result.json').write_text(json.dumps(result,indent=2))
     print('RESULT',json.dumps(result))
 
